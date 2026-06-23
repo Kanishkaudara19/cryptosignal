@@ -282,6 +282,7 @@
                 <th>#</th>
                 <th>Coin</th>
                 <th>Type</th>
+                <th>Source</th>
                 <th>Strength</th>
                 <th style="text-align:right">Entry</th>
                 <th style="text-align:right">TP1</th>
@@ -318,6 +319,15 @@
 
             {{-- Trade type --}}
             <td><span class="badge badge-{{ $s->trade_type }}">{{ strtoupper($s->trade_type) }}</span></td>
+
+            {{-- Source --}}
+            <td>
+                @if(($s->source ?? 'manual') === 'auto')
+                    <span class="badge" style="background:rgba(155,109,255,.2);color:var(--purple);border:1px solid rgba(155,109,255,.3);font-size:9px">🤖 AUTO</span>
+                @else
+                    <span class="badge" style="background:rgba(255,255,255,.05);color:var(--text-muted);border:1px solid rgba(255,255,255,.1);font-size:9px">👤 MANUAL</span>
+                @endif
+            </td>
 
             {{-- Strength --}}
             <td><span class="badge badge-{{ $s->signal_strength }}">{{ $s->signal_strength }}</span></td>

@@ -14,6 +14,8 @@ use App\Http\Controllers\SignalController;
 
 // Main dashboard
 Route::get('/', [DashboardController::class, 'index'])->name('dashboard');
+Route::get('/dashboard/recent-signals', [DashboardController::class, 'recentSignals'])->name('dashboard.recent-signals');
+Route::get('/dashboard/auto-signal-alert', [DashboardController::class, 'autoSignalAlert'])->name('dashboard.auto-signal-alert');
 
 // Signal routes
 Route::prefix('signals')->name('signals.')->group(function () {

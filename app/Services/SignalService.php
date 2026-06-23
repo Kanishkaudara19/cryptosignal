@@ -26,7 +26,30 @@ class SignalService
     //  MAIN ENTRY
     // ─────────────────────────────────────────────────────────────────────
 
-    public function generate(string $symbol, string $interval = '15m'): array
+    public function generate(string $symbol, string $interval = '15m', string $source = 'manual'): array
+    {
+        $signal = $this->evaluate($symbol, $interval);
+
+        $saved          = Signal::create(array_merge($signal, [
+            'status' => 'active',
+            'source' => $source
+        ]));
+        $signal['id']   = $saved->id;
+        $signal['source'] = $source;
+
+        Log::info("Signal generated & saved: {$symbol} {$signal['trade_type']} @ {$signal['entry_price']} [{$interval}] Source: {$source}", [
+            'confidence' => $signal['confidence'],
+            'strength'   => $signal['signal_strength'],
+            'leverage'   => $signal['leverage'],
+        ]);
+
+        return $signal;
+    }
+
+    /**
+     * Evaluate a coin and return signal data WITHOUT saving to database.
+     */
+    public function evaluate(string $symbol, string $interval = '15m'): array
     {
         $symbol = strtoupper($symbol);
 
@@ -59,7 +82,7 @@ class SignalService
         $mode       = $this->suggestMode($strength, $leverage, $confidence);
         $coinName   = Coin::where('symbol', $symbol)->value('name') ?? $symbol;
 
-        $signal = [
+        return [
             'symbol'          => $symbol,
             'coin_name'       => $coinName,
             'interval'        => $interval,
@@ -83,17 +106,6 @@ class SignalService
             'bb_middle'       => $ind['bb_middle'],
             'bb_lower'        => $ind['bb_lower'],
         ];
-
-        $saved          = Signal::create(array_merge($signal, ['status' => 'active']));
-        $signal['id']   = $saved->id;
-
-        Log::info("Signal generated: {$symbol} {$direction} @ {$entryPrice} [{$interval}]", [
-            'confidence' => $confidence,
-            'strength'   => $strength,
-            'leverage'   => $leverage,
-        ]);
-
-        return $signal;
     }
 
     // ─────────────────────────────────────────────────────────────────────

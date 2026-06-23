@@ -10,8 +10,7 @@ use Illuminate\Http\Client\RequestException;
 
 class BinanceService
 {
-    protected string $baseUrl     = 'https://fapi.binance.com/fapi/v1';  // Futures — used for all signals
-    protected string $spotUrl     = 'https://api.binance.com/api/v3';    // Spot — used only for syncAllCoins
+    protected string $baseUrl = 'https://fapi.binance.com/fapi/v1';  // Binance Futures (USDT-Margined)
 
     // ─────────────────────────────────────────────────────────────────────
     //  TICKER — 24h price stats

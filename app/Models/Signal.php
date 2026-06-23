@@ -14,7 +14,7 @@ class Signal extends Model
         'confidence', 'signal_strength',
         'rsi', 'macd', 'macd_signal', 'ema9', 'ema21', 'ema50',
         'bb_upper', 'bb_lower', 'bb_middle',
-        'status', 'close_price', 'pnl_percent', 'closed_at',
+        'status', 'source', 'close_price', 'pnl_percent', 'closed_at',
     ];
 
     protected $casts = [

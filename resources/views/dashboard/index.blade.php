@@ -86,7 +86,7 @@
 <div class="controls-bar">
     <div class="page-title">
         <span class="ws-dot" id="wsDot"></span>
-        <span id="pageLabel">Market Dashboard</span>
+        <span id="pageLabel">Futures Market Dashboard</span>
     </div>
     <div class="coin-search-wrap">
         <input type="text" id="coinSearchInput" placeholder="Search coin…" autocomplete="off"
@@ -101,6 +101,14 @@
     </div>
     <button class="btn" onclick="hardRefresh()"><span id="refreshIcon">↻</span> Refresh</button>
 </div>
+
+<div id="autoSignalAlertWrap">
+    @include('dashboard.auto_signal_alert')
+</div>
+
+<style>
+@keyframes slideIn { from { transform: translateY(-10px); opacity:0; } to { transform: translateY(0); opacity:1; } }
+</style>
 
 <div class="metric-strip">
     <div class="metric-tile">
@@ -224,42 +232,9 @@
     </div>
 </div>
 
-@if($recentSignals->count() > 0)
-<div class="card mt-3">
-    <div class="card-header">
-        <span class="card-title">Recent signals</span>
-        <a href="{{ route('signals.index') }}" style="font-size:11px;color:var(--text-muted)">View all →</a>
-    </div>
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Coin</th><th>Type</th><th>Mode</th>
-                <th style="text-align:right">Entry</th>
-                <th style="text-align:right">TP1</th><th style="text-align:right">TP2</th><th style="text-align:right">TP3</th>
-                <th style="text-align:right">Stop loss</th>
-                <th style="text-align:right">Lev.</th><th style="text-align:right">Conf.</th><th style="text-align:right">Status</th>
-            </tr>
-        </thead>
-        <tbody>
-            @foreach($recentSignals as $s)
-            <tr onclick="window.location='{{ route('signals.show',$s) }}'" style="cursor:pointer">
-                <td><div class="fw-600">{{ str_replace('USDT','',$s->symbol) }}</div><div class="text-dim" style="font-size:10px">{{ $s->interval }}</div></td>
-                <td><span class="badge badge-{{ $s->trade_type }}">{{ strtoupper($s->trade_type) }}</span></td>
-                <td class="text-muted">{{ $s->mode }}</td>
-                <td class="mono" style="text-align:right">${{ number_format($s->entry_price,4) }}</td>
-                <td class="mono text-up" style="text-align:right">${{ number_format($s->take_profit_1,4) }}</td>
-                <td class="mono text-up" style="text-align:right">${{ number_format($s->take_profit_2,4) }}</td>
-                <td class="mono text-up" style="text-align:right">${{ number_format($s->take_profit_3,4) }}</td>
-                <td class="mono text-dn" style="text-align:right">${{ number_format($s->stop_loss,4) }}</td>
-                <td class="mono fw-600" style="text-align:right;color:var(--amber)">{{ $s->leverage }}x</td>
-                <td class="mono" style="text-align:right">{{ $s->confidence }}%</td>
-                <td style="text-align:right"><span class="badge badge-{{ $s->status }}">{{ str_replace('_',' ',$s->status) }}</span></td>
-            </tr>
-            @endforeach
-        </tbody>
-    </table>
+<div id="recentSignalsWrap">
+    @include('dashboard.recent_signals', ['recentSignals' => $recentSignals])
 </div>
-@endif
 
 @endsection
 
@@ -271,7 +246,7 @@
 //  CONSTANTS & STATE
 // ═══════════════════════════════════════════════════════════════════════
 const FAPI    = 'https://fapi.binance.com/fapi/v1';
-const FSTREAM = 'wss://fstream.binance.com/ws';
+const FSTREAM = 'wss://fstream.binance.com';
 
 let sym       = 'BTCUSDT';
 let tf        = '15m';
@@ -280,11 +255,12 @@ let allPairs  = [];
 let prevPrice = null;
 
 // ONE WebSocket per purpose — strictly managed
-let wsA = null;  // markPrice@1s  → price tile (guaranteed every 1s)
-let wsB = null;  // kline_TF      → chart + OHLCV bar
-let wsC = null;  // depth20@100ms → order book
-let wsD = null;  // ticker        → 24h stats
-let wsE = null;  // !miniTicker   → watchlist all-coins
+let wsComb = null; // Combined stream for current symbol
+let wsE    = null; // !miniTicker     → watchlist all-coins
+
+// Timers for auto-refresh
+let autoTimer = null;
+let lastObUpdate = 0;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  HELPERS
@@ -456,7 +432,7 @@ function renderChart(labels,closes,highs,lows) {
 //  4. MINI-TICKER WS — all-coins watchlist (every 1s)
 // ═══════════════════════════════════════════════════════════════════════
 function connectMiniTicker() {
-    wsE = makeWs(FSTREAM+'/!miniTicker@arr', (ev) => {
+    wsE = makeWs(FSTREAM+'/ws/!miniTicker@arr', (ev) => {
         const arr = JSON.parse(ev.data);
         arr.forEach(t => {
             if (!t.s || !t.s.endsWith('USDT')) return;
@@ -478,102 +454,77 @@ function connectMiniTicker() {
 //     Fields: e=markPriceUpdate, s, p=markPrice, i=indexPrice,
 //             r=fundingRate, T=nextFundingTime
 // ═══════════════════════════════════════════════════════════════════════
-function connectMarkPrice() {
-    if (wsA) wsA.close();
-    wsA = makeWs(`${FSTREAM}/${sym.toLowerCase()}@markPrice@1s`, (ev) => {
-        const d = JSON.parse(ev.data);
-        // d.p = mark price string, guaranteed every 1000ms
-        const price = parseFloat(d.p);
-        if (isFinite(price) && price > 0) setPrice(price);
+function connectMainStreams() {
+    if (wsComb) wsComb.close();
+    
+    const streams = [
+        `${sym.toLowerCase()}@markPrice@1s`,
+        `${sym.toLowerCase()}@ticker`,
+        `${sym.toLowerCase()}@kline_${tf}`,
+        `${sym.toLowerCase()}@depth20`
+    ].join('/');
 
-        // Funding rate (Futures-specific — shown in place of Spread)
-        const fr = parseFloat(d.r);
-        if (isFinite(fr)) {
-            const pct = (fr*100).toFixed(4)+'%';
-            setText('mFunding', pct);
-            el('mFunding').style.color = fr>=0?'var(--green)':'var(--red)';
-            // Next funding countdown
-            if (d.T) {
-                const ms = d.T - Date.now();
-                if (ms>0) {
-                    const h=Math.floor(ms/3600000), m=Math.floor((ms%3600000)/60000), s=Math.floor((ms%60000)/1000);
-                    setText('mFundingSub', `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`);
+    wsComb = makeWs(`${FSTREAM}/stream?streams=${streams}`, (ev) => {
+        const msg = JSON.parse(ev.data);
+        const stream = msg.stream;
+        const d = msg.data;
+
+        if (stream.includes('@markPrice')) {
+            const price = parseFloat(d.p);
+            if (isFinite(price) && price > 0) setPrice(price);
+            const fr = parseFloat(d.r);
+            if (isFinite(fr)) {
+                const pct = (fr*100).toFixed(4)+'%';
+                setText('mFunding', pct);
+                el('mFunding').style.color = fr>=0?'var(--green)':'var(--red)';
+                if (d.T) {
+                    const ms = d.T - Date.now();
+                    if (ms>0) {
+                        const h=Math.floor(ms/3600000), m=Math.floor((ms%3600000)/60000), s=Math.floor((ms%60000)/1000);
+                        setText('mFundingSub', `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`);
+                    }
                 }
             }
+            setText('lbTime', new Date().toLocaleTimeString('en-US',{hour12:false}));
+        } 
+        else if (stream.includes('@ticker')) {
+            const change=parseFloat(d.P), abs=parseFloat(d.p);
+            const high=parseFloat(d.h), low=parseFloat(d.l), vol=parseFloat(d.q);
+            if(isFinite(change)) setChange(change, abs);
+            if(isFinite(high)&&high>0) setText('mHigh', fmt(high));
+            if(isFinite(low) &&low >0) setText('mLow',  fmt(low));
+            if(isFinite(vol) &&vol >0) setText('mVol',  fmtVol(vol));
         }
-        setText('lbTime', new Date().toLocaleTimeString('en-US',{hour12:false}));
-    });
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  6. KLINE WS — live OHLCV for current candle (fires per trade on Futures)
-// ═══════════════════════════════════════════════════════════════════════
-function connectKline() {
-    if (wsB) wsB.close();
-    wsB = makeWs(`${FSTREAM}/${sym.toLowerCase()}@kline_${tf}`, (ev) => {
-        const k = JSON.parse(ev.data).k;
-        if (!k) return;
-        setText('lbO', fmt(k.o));
-        setText('lbH', fmt(k.h));
-        setText('lbL', fmt(k.l));
-        setText('lbC', fmt(k.c));
-        setText('lbV', fmtVol(k.q));
-        setText('lbT', parseInt(k.n||0).toLocaleString());
-
-        if (chart) {
-            const ds=chart.data.datasets, len=ds[0].data.length;
-            if (len>0) {
-                ds[0].data[len-1]=parseFloat(k.c);
-                ds[1].data[len-1]=parseFloat(k.h);
-                ds[2].data[len-1]=parseFloat(k.l);
-                chart.update('none');
+        else if (stream.includes('@kline')) {
+            const k = d.k;
+            setText('lbO', fmt(k.o));
+            setText('lbH', fmt(k.h));
+            setText('lbL', fmt(k.l));
+            setText('lbC', fmt(k.c));
+            setText('lbV', fmtVol(k.q));
+            setText('lbT', parseInt(k.n||0).toLocaleString());
+            if (chart) {
+                const ds=chart.data.datasets, len=ds[0].data.length;
+                if (len>0) {
+                    ds[0].data[len-1]=parseFloat(k.c);
+                    ds[1].data[len-1]=parseFloat(k.h);
+                    ds[2].data[len-1]=parseFloat(k.l);
+                    chart.update('none');
+                }
             }
+            if (k.x) setTimeout(fetchCandles, 500);
         }
-        // When candle closes, fetch fresh history (new candle opened)
-        if (k.x) setTimeout(fetchCandles, 500);
-    });
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  7. DEPTH WS — order book 10×/second
-//     Stream: <sym>@depth20@100ms
-//     Returns: { lastUpdateId, T, E, bids:[[p,q]…], asks:[[p,q]…] }
-// ═══════════════════════════════════════════════════════════════════════
-function connectDepth() {
-    if (wsC) wsC.close();
-    wsC = makeWs(`${FSTREAM}/${sym.toLowerCase()}@depth20@100ms`,
-        (ev) => {
-            const d    = JSON.parse(ev.data);
-            const bids = d.bids||d.b||[];
-            const asks = d.asks||d.a||[];
+        else if (stream.includes('@depth')) {
+            const now = Date.now();
+            if (now - lastObUpdate < 1000) return;
+            lastObUpdate = now;
+            const bids = d.b||[];
+            const asks = d.a||[];
             if (!bids.length || !asks.length) return;
-
             renderBook(bids, asks);
-
             const bid=parseFloat(bids[0][0]), ask=parseFloat(asks[0][0]);
-            if (bid>0 && ask>0) {
-                setText('obMid',    fmt((bid+ask)/2));
-                // Update spread tile (reuse mFundingSub only for depth spread here when needed)
-            }
-        },
-        () => setText('obLabel', sym)
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  (bonus) TICKER WS — live 24h stats every second
-//     Stream: <sym>@ticker
-// ═══════════════════════════════════════════════════════════════════════
-function connectTicker() {
-    if (wsD) wsD.close();
-    wsD = makeWs(`${FSTREAM}/${sym.toLowerCase()}@ticker`, (ev) => {
-        const d=JSON.parse(ev.data);
-        const change=parseFloat(d.P), abs=parseFloat(d.p);
-        const high=parseFloat(d.h), low=parseFloat(d.l), vol=parseFloat(d.q);
-        if(isFinite(change)) setChange(change, abs);
-        if(isFinite(high)&&high>0) setText('mHigh', fmt(high));
-        if(isFinite(low) &&low >0) setText('mLow',  fmt(low));
-        if(isFinite(vol) &&vol >0) setText('mVol',  fmtVol(vol));
+            if (bid>0 && ask>0) setText('obMid', fmt((bid+ask)/2));
+        }
     });
 }
 
@@ -692,14 +643,40 @@ function selectCoin(symbol) {
     if(p&&p.price){ setPrice(p.price); }
     if(p&&p.change!==null){ setChange(p.change, null); }
 
-    // Reconnect all streams for new symbol
-    connectMarkPrice();   // 5. guaranteed 1s price
-    connectKline();       // 6. OHLCV + chart
-    connectDepth();       // 7. order book
-    connectTicker();      // bonus: live 24h stats
+    // Reconnect main combined streams (Mark Price, Ticker, Kline, Depth)
+    connectMainStreams();
     fetchCandles();       // chart REST
     seedMetrics();        // 24h metrics REST seed
+
+    // Restart auto-refresh cycle
+    startAutoRefresh();
 }
+
+function startAutoRefresh() {
+    if (autoTimer) clearInterval(autoTimer);
+    autoTimer = setInterval(() => {
+        loadIndicators();
+        refreshRecentSignals();
+        refreshAutoSignalAlert();
+    }, 15000);
+}
+
+async function refreshRecentSignals() {
+    try {
+        const r = await fetch('/dashboard/recent-signals');
+        if (r.ok) el('recentSignalsWrap').innerHTML = await r.text();
+    } catch(e) {}
+}
+
+async function refreshAutoSignalAlert() {
+    try {
+        const r = await fetch('/dashboard/auto-signal-alert');
+        if (r.ok) el('autoSignalAlertWrap').innerHTML = await r.text();
+    } catch(e) {}
+}
+
+// Initial start
+setTimeout(startAutoRefresh, 5000);
 
 // ═══════════════════════════════════════════════════════════════════════
 //  TIMEFRAME
@@ -707,7 +684,7 @@ function selectCoin(symbol) {
 function setTf(newTf) {
     tf=newTf;
     document.querySelectorAll('.tf-btn').forEach(b=>b.classList.toggle('active',b.dataset.tf===newTf));
-    connectKline();
+    connectMainStreams();
     fetchCandles();
 }
 
@@ -820,12 +797,10 @@ function hardRefresh() {
     seedMetrics();           // 2. seed main metric tiles from REST
     fetchCandles();          // 3. draw chart
     connectMiniTicker();     // 4. live watchlist all-coins 1s
-    connectMarkPrice();      // 5. markPrice@1s — guaranteed 1-second price tick
-    connectKline();          // 6. live OHLCV + chart candle update
-    connectDepth();          // 7. live order book 10×/second
-    connectTicker();         // bonus: live 24h high/low/vol/change 1s
+    connectMainStreams();    // 5. Combined streams for current symbol (Mark Price, Ticker, Kline, Depth)
 
     setInterval(fetchCandles, 60000); // chart REST refresh every 60s
+    startAutoRefresh();
 })();
 </script>
 @endpush
