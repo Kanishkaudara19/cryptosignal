@@ -77,7 +77,7 @@ class GenerateBestSignal extends Command
             ]
         );
 
-        Log::info("Hourly best signal generated: {$finalSignal['symbol']} @ {$finalSignal['entry_price']}");
+        Log::info("30-minute best signal generated: {$finalSignal['symbol']} @ {$finalSignal['entry_price']}");
 
         return self::SUCCESS;
     }

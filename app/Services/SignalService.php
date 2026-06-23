@@ -13,13 +13,15 @@ class SignalService
     private const MEDIUM_SIGNAL_SCORE = 3;
     private const MIN_SIGNAL_SCORE    = 2;
 
-    private BinanceService   $binance;
-    private IndicatorService $indicators;
+    private BinanceService    $binance;
+    private IndicatorService  $indicators;
+    private CandlestickService $candlesticks;
 
-    public function __construct(BinanceService $binance, IndicatorService $indicators)
+    public function __construct(BinanceService $binance, IndicatorService $indicators, CandlestickService $candlesticks)
     {
-        $this->binance     = $binance;
-        $this->indicators  = $indicators;
+        $this->binance      = $binance;
+        $this->indicators   = $indicators;
+        $this->candlesticks = $candlesticks;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -57,6 +59,7 @@ class SignalService
         $ohlcv        = $this->binance->getOhlcv($symbol, $interval, 100);
         $currentPrice = $this->binance->getCurrentPrice($symbol);
 
+        // ── Step 1: Base interpretation ──────────────────────────────
         $longScore  = $this->scoreLong($ind);
         $shortScore = $this->scoreShort($ind);
         $direction  = $this->decideDirection($longScore, $shortScore);
@@ -68,15 +71,26 @@ class SignalService
             );
         }
 
+        // ── Step 2: Multi-Timeframe Confluence (MTF) ─────────────────
+        $mtfMatch = $this->checkMTFConfluence($symbol, $interval, $direction);
+
+        // ── Step 3: Candlestick Pattern Analysis ─────────────────────
+        $patterns = $this->candlesticks->analyze($ohlcv);
+
+        // ── Step 4: TP/SL ──────────────────────────────────────────
         $atr        = $this->indicators->atr($ohlcv, 14);
         $entryPrice = $this->calcEntryPrice($currentPrice, $direction, $atr);
+        $levels     = $this->calcSupportResistance($ohlcv);
+        $targets    = $this->calcTargets($entryPrice, $direction, $atr, $ind, $levels);
 
-        // ── Part 5: refined targets with S/R ──────────────────────────
-        $levels  = $this->calcSupportResistance($ohlcv);
-        $targets = $this->calcTargets($entryPrice, $direction, $atr, $ind, $levels);
-
+        // ── Step 5: Scoring & Confidence ───────────────────────────
         $score      = $direction === 'long' ? $longScore : $shortScore;
-        $confidence = $this->calcConfidence($score, $ind);
+        
+        // Add bonuses
+        if ($mtfMatch) $score += 2;
+        if ($patterns['bias'] === $direction) $score += $patterns['strength'];
+
+        $confidence = $this->calcConfidence($score, $ind, $mtfMatch, $patterns);
         $strength   = $this->calcStrength($score);
         $leverage   = $this->suggestLeverage($atr, $currentPrice, $strength);
         $mode       = $this->suggestMode($strength, $leverage, $confidence);
@@ -408,13 +422,49 @@ class SignalService
         return $direction === 'long' ? $currentPrice - $offset : $currentPrice + $offset;
     }
 
-    private function calcConfidence(int $score, array $ind): float
+    private function calcConfidence(int $score, array $ind, bool $mtfMatch, array $patterns): float
     {
-        $base       = min($score / 10 * 70, 70);
-        $trendBonus = $ind['trend_strength'] > 50 ? min($ind['trend_strength'] / 100 * 20, 20) : 0;
+        // ── Base score from main indicators (max 60)
+        $base = min($score / 12 * 60, 60);
+
+        // ── Confluence Bonus (max 20)
+        $mtfBonus     = $mtfMatch ? 10 : 0;
+        $patternBonus = ($patterns['strength'] ?? 0) * 2;
+        $confluence   = min($mtfBonus + $patternBonus, 20);
+
+        // ── Market Condition Bonus (max 20)
+        $trendBonus = $ind['trend_strength'] > 60 ? 10 : 0;
         $rsi        = (float) $ind['rsi'];
         $rsiBonus   = ($rsi <= 30 || $rsi >= 70) ? 10 : 0;
-        return min($base + $trendBonus + $rsiBonus, 100);
+        $market     = $trendBonus + $rsiBonus;
+
+        return min($base + $confluence + $market, 100);
+    }
+
+    /**
+     * Verify if the higher timeframes (1h, 4h) support the current trade direction.
+     */
+    private function checkMTFConfluence(string $symbol, string $interval, string $direction): bool
+    {
+        // Only perform MTF for short-term intervals
+        if (!in_array($interval, ['1m', '5m', '15m', '30m'])) {
+            return true;
+        }
+
+        try {
+            // Check 1h
+            $h1 = $this->indicators->calculate($symbol, '1h', false);
+            if ($h1['overall_trend'] !== $direction) return false;
+
+            // Check 4h
+            $h4 = $this->indicators->calculate($symbol, '4h', false);
+            if ($h4['overall_trend'] !== $direction) return false;
+
+            return true;
+        } catch (\Exception $e) {
+            // If data is missing for higher timeframes, don't fail, but don't give bonus either
+            return false;
+        }
     }
 
     private function calcStrength(int $score): string
